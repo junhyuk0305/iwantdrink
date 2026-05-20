@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>iWantDrink - 3D 마음 양조장</title>
+    <!-- React & Tailwind -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- Three.js (r128) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Tween.js for Animations -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Nanum+Pen+Script&family=Noto+Sans+KR:wght@300;400;700&display=swap');
+
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+            background-color: #000; /* 3D 배경이 주로 채움 */
+            color: white;
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
+        }
+
+        .font-handwriting {
+            font-family: 'Nanum Pen Script', cursive;
+            font-size: 1.5rem;
+        }
+
+        /* 3D 캔버스 컨테이너 */
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+        }
+
+        /* UI 레이어 (3D 위에 오버레이) */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 20;
+            pointer-events: none; /* UI 배경은 클릭 투과 */
+        }
+        
+        /* 상호작용이 필요한 UI 요소는 pointer-events 활성화 */
+        .interactive-ui {
+            pointer-events: auto;
+        }
+
+        /* 부유하는 텍스트 (3D 씬과 동기화됨) */
+        .floating-text-label {
+            position: absolute;
+            white-space: nowrap;
+            color: rgba(255, 255, 255, 0.8);
+            text-shadow: 0 2px 5px rgba(0,0,0,1);
+            pointer-events: none;
+            transform: translate(-50%, -50%);
+            opacity: 0;
+            transition: opacity 0.5s ease;
+        }
+
+        /* 모달 애니메이션 */
+        .modal-enter { animation: modalFadeIn 0.2s ease-out forwards; }
+        @keyframes modalFadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        ::-webkit-scrollbar { width: 0px; background: transparent; }
+        
+        /* 텍스트 영역 테두리 애니메이션 (넘칠 때) */
+        @keyframes pulseBorder {
+            0% { border-color: rgb(239, 68, 68); box-shadow: 0 0 0 rgba(239, 68, 68, 0); }
+            50% { border-color: rgb(248, 113, 113); box-shadow: 0 0 15px rgba(239, 68, 68, 0.5); }
+            100% { border-color: rgb(239, 68, 68); box-shadow: 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .textarea-overflow {
+            animation: pulseBorder 1.5s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // --- Data Definitions ---
+        
+        // 색상 헥스 코드 (Three.js 용)
+        const COLORS = {
+            chamisul: 0xbae6fd, // 하늘색
+            jinro: 0x93c5fd,    // 파란색
+            saero: 0xf8fafc,    // 투명/흰색
+            joenday: 0xfecaca,  // 분홍색
+            cass: 0xfde047,     // 노란색
+            terra: 0xfef08a,    // 밝은 노란색
+            guinness: 0x27272a, // 다크 흑맥주
+            cabernet: 0x9f1239, // 진홍색
+            chardonnay: 0xfde047,// 화이트와인
+            rose: 0xf472b6,     // 로제 핑크
+            balvenie: 0xd97706, // 호박색
+            macallan: 0x991b1b, // 짙은 붉은갈색
+            jack: 0x713f12      // 짙은 갈색
+        };
+
+        const GLASS_TYPES = {
+            shot: { id: 'shot', name: '소주잔', capacity: 30, reqDrinks: 0, icon: 'fa-glass-whiskey', radius: 1.2, height: 2.5, type: 'cylinder' },
+            beer: { id: 'beer', name: '맥주잔', capacity: 100, reqDrinks: 3, icon: 'fa-beer', radius: 1.8, height: 5, type: 'cylinder' },
+            wine: { id: 'wine', name: '와인잔', capacity: 200, reqDrinks: 7, icon: 'fa-wine-glass-alt', radius: 2.5, height: 3, stem: true, type: 'sphere' },
+            whiskey: { id: 'whiskey', name: '위스키잔', capacity: 500, reqDrinks: 15, icon: 'fa-glass-whiskey', radius: 2, height: 3.5, type: 'cylinder' }
+        };
+
+        const LIQUOR_BRANDS = {
+            shot: [
+                { id: 'chamisul', name: '참이슬', colorHex: COLORS.chamisul, text: '맑고 투명한 한숨', tailwind: 'bg-sky-200' },
+                { id: 'jinro', name: '진로 이즈 백', colorHex: COLORS.jinro, text: '푸른빛 스트레스', tailwind: 'bg-blue-300' },
+                { id: 'saero', name: '새로', colorHex: COLORS.saero, text: '제로 슈거 제로 행복', tailwind: 'bg-slate-100' },
+                { id: 'joenday', name: '좋은데이', colorHex: COLORS.joenday, text: '달콤쌉쌀한 오늘', tailwind: 'bg-red-200' }
+            ],
+            beer: [
+                { id: 'cass', name: '카스', colorHex: COLORS.cass, text: '톡 쏘는 상사 잔소리', tailwind: 'bg-yellow-300' },
+                { id: 'terra', name: '테라', colorHex: COLORS.terra, text: '청정 라거급 시원함', tailwind: 'bg-yellow-200' },
+                { id: 'guinness', name: '기네스', colorHex: COLORS.guinness, text: '다크한 야근의 맛', tailwind: 'bg-zinc-800' }
+            ],
+            wine: [
+                { id: 'cabernet', name: '까베르네 소비뇽', colorHex: COLORS.cabernet, text: '묵직한 책임감', tailwind: 'bg-rose-800' },
+                { id: 'chardonnay', name: '샤르도네', colorHex: COLORS.chardonnay, text: '가벼운 척하는 피로', tailwind: 'bg-yellow-300' },
+                { id: 'rose', name: '로제 와인', colorHex: COLORS.rose, text: '감정 노동의 핑크빛', tailwind: 'bg-pink-400' }
+            ],
+            whiskey: [
+                { id: 'balvenie', name: '발베니 12년', colorHex: COLORS.balvenie, text: '부드러운 현타', tailwind: 'bg-amber-600' },
+                { id: 'macallan', name: '맥캘란', colorHex: COLORS.macallan, text: '진한 번아웃', tailwind: 'bg-red-800' },
+                { id: 'jack', name: '잭 다니엘', colorHex: COLORS.jack, text: '거친 자본주의의 맛', tailwind: 'bg-yellow-900' }
+            ]
+        };
+
+        const OTHER_USERS_TEXTS = [
+            "아 오늘 부장님 진짜...", "야근수당도 안주면서 ㅠㅠ", "이직 마렵다", 
+            "주식이 또 파란불이네", "오늘 점심 메뉴 맘에 안들었음", "집에 가고 싶다",
+            "내일 발표 어떡하지", "팀장님 톡좀 그만", "카드값 미쳤다", "퇴사 언제하지"
+        ];
+
+        // --- Three.js Setup (Global scope for React to access) ---
+        let scene, camera, renderer, mainGlassGroup, liquidMesh, overflowParticles, puddleMesh;
+        let bgGlassesInfo = [];
+        let isAnimating = true;
+        let currentGlassData = GLASS_TYPES.shot;
+        
+        const initThreeJS = () => {
+            const container = document.getElementById('canvas-container');
+            
+            // Scene & Camera
+            scene = new THREE.Scene();
+            // 어두운 바 분위기 (안개 추가)
+            scene.background = new THREE.Color(0x0a0a10);
+            scene.fog = new THREE.Fog(0x0a0a10, 10, 40);
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+            // 약간 위에서 내려다보는 뷰
+            camera.position.set(0, 8, 15);
+            camera.lookAt(0, 0, 0);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+
+            // 주요 핀 조명 (바 테이블 위의 스포트라이트 느낌)
+            const spotLight = new THREE.SpotLight(0xfff0dd, 1.5);
+            spotLight.position.set(0, 15, 5);
+            spotLight.angle = Math.PI / 4;
+            spotLight.penumbra = 0.5;
+            spotLight.castShadow = true;
+            scene.add(spotLight);
+            
+            // 후면 푸른빛 (분위기용)
+            const backLight = new THREE.PointLight(0x4444ff, 0.8);
+            backLight.position.set(0, 5, -10);
+            scene.add(backLight);
+
+            // Table (나무 질감 또는 매끈한 바 카운터)
+            const tableGeo = new THREE.PlaneGeometry(100, 100);
+            const tableMat = new THREE.MeshStandardMaterial({ 
+                color: 0x1a1210, 
+                roughness: 0.2, 
+                metalness: 0.1 
+            });
+            const table = new THREE.Mesh(tableGeo, tableMat);
+            table.rotation.x = -Math.PI / 2;
+            table.receiveShadow = true;
+            scene.add(table);
+
+            // 메인 그룹 (내 술잔 전체)
+            mainGlassGroup = new THREE.Group();
+            mainGlassGroup.position.set(0, 0, 2); // 약간 앞쪽
+            scene.add(mainGlassGroup);
+
+            // 웅덩이 (Overflow Spill) - 초기엔 보이지 않음
+            const puddleGeo = new THREE.PlaneGeometry(6, 6);
+            const puddleMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0, depthWrite: false });
+            puddleMesh = new THREE.Mesh(puddleGeo, puddleMat);
+            puddleMesh.rotation.x = -Math.PI / 2;
+            puddleMesh.position.y = 0.01; // 테이블 바로 위
+            mainGlassGroup.add(puddleMesh);
+
+            // 파티클 (Overflow Drops) - 분수처럼 솟구칠 입자들
+            const particleGeo = new THREE.BufferGeometry();
+            const particleCount = 50;
+            const posArray = new Float32Array(particleCount * 3);
+            for(let i=0; i<particleCount*3; i++) posArray[i] = 0;
+            particleGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            // 커스텀 속성: 속도 저장용
+            particleGeo.userData = { velocities: [] };
+            for(let i=0; i<particleCount; i++) {
+                particleGeo.userData.velocities.push(new THREE.Vector3(0,0,0));
+            }
+            const particleMat = new THREE.PointsMaterial({
+                size: 0.2,
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0
+            });
+            overflowParticles = new THREE.Points(particleGeo, particleMat);
+            mainGlassGroup.add(overflowParticles);
+
+            buildGlass(GLASS_TYPES.shot, COLORS.chamisul);
+            createBackgroundGlasses();
+
+            // Resize Event
+            window.addEventListener('resize', onWindowResize, false);
+            
+            // Start Loop
+            animateLoop();
+        };
+
+        const buildGlass = (glassData, liquidColorHex) => {
+            currentGlassData = glassData;
+            
+            // 기존 잔과 액체 제거
+            const toRemove = [];
+            mainGlassGroup.children.forEach(child => {
+                if (child.userData.isGlass || child.userData.isLiquid) {
+                    toRemove.push(child);
+                }
+            });
+            toRemove.forEach(child => {
+                mainGlassGroup.remove(child);
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) {
+                    if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+                    else child.material.dispose();
+                }
+            });
+
+            // 유리 재질 (투명하고 반사광이 있는 프리미엄 느낌)
+            const glassMat = new THREE.MeshPhysicalMaterial({
+                color: 0xffffff,
+                metalness: 0.1,
+                roughness: 0.05,
+                transmission: 0.9, // 유리처럼 투명하게
+                thickness: 0.5,
+                transparent: true,
+                opacity: 1
+            });
+
+            // 액체 재질
+            const liquidMat = new THREE.MeshStandardMaterial({
+                color: liquidColorHex,
+                transparent: true,
+                opacity: 0.85,
+                roughness: 0.2
+            });
+
+            let glassGeo, liquidGeo;
+            const r = glassData.radius;
+            const h = glassData.height;
+
+            if (glassData.type === 'cylinder') {
+                // 원통형 (소주, 맥주, 위스키) - 바닥을 두껍게 표현
+                glassGeo = new THREE.CylinderGeometry(r, r * 0.85, h, 32, 1, true); // 뚜껑 없음
+                const baseGeo = new THREE.CylinderGeometry(r * 0.85, r * 0.8, 0.5, 32); // 두꺼운 바닥
+                const baseMesh = new THREE.Mesh(baseGeo, glassMat);
+                baseMesh.position.y = 0.25;
+                baseMesh.castShadow = true;
+                baseMesh.userData.isGlass = true;
+                mainGlassGroup.add(baseMesh);
+
+                const wallMesh = new THREE.Mesh(glassGeo, glassMat);
+                wallMesh.position.y = h / 2 + 0.5; // 바닥 위에 위치
+                wallMesh.castShadow = true;
+                wallMesh.userData.isGlass = true;
+                mainGlassGroup.add(wallMesh);
+
+                // 액체
+                liquidGeo = new THREE.CylinderGeometry(r * 0.95, r * 0.82, h * 0.9, 32);
+                liquidMesh = new THREE.Mesh(liquidGeo, liquidMat);
+                // 중심점을 바닥으로 이동시켜 scale 변경 시 위로만 커지게 함
+                liquidGeo.translate(0, (h*0.9)/2, 0); 
+                liquidMesh.position.y = 0.55; // 바닥 바로 위
+                liquidMesh.scale.y = 0.01; // 초기엔 거의 없음
+                liquidMesh.userData.isLiquid = true;
+                mainGlassGroup.add(liquidMesh);
+
+            } else if (glassData.type === 'sphere') {
+                // 와인잔 (구형 반쪽 + 기둥)
+                glassGeo = new THREE.SphereGeometry(r, 32, 32, 0, Math.PI * 2, 0, Math.PI / 1.5);
+                const bowl = new THREE.Mesh(glassGeo, glassMat);
+                bowl.position.y = 2.5; // 기둥 위
+                bowl.rotation.x = Math.PI; // 뒤집기
+                bowl.castShadow = true;
+                bowl.userData.isGlass = true;
+                mainGlassGroup.add(bowl);
+
+                // 기둥과 받침
+                const stemGeo = new THREE.CylinderGeometry(0.15, 0.15, 2.5, 16);
+                const stem = new THREE.Mesh(stemGeo, glassMat);
+                stem.position.y = 1.25;
+                stem.userData.isGlass = true;
+                mainGlassGroup.add(stem);
+
+                const footGeo = new THREE.CylinderGeometry(r * 0.8, r * 0.8, 0.1, 32);
+                const foot = new THREE.Mesh(footGeo, glassMat);
+                foot.position.y = 0.05;
+                foot.userData.isGlass = true;
+                mainGlassGroup.add(foot);
+
+                // 액체 (구형 반쪽 기반)
+                liquidGeo = new THREE.SphereGeometry(r * 0.95, 32, 32, 0, Math.PI * 2, 0, Math.PI / 1.8);
+                liquidMesh = new THREE.Mesh(liquidGeo, liquidMat);
+                // Y 위치 조정 (구의 중심)
+                liquidMesh.position.y = 2.5 - r * 0.95 + 1.2; 
+                // 와인잔은 scale.y 대신 액체 자체를 아래로 내렸다가 올리는 방식 사용
+                liquidMesh.scale.set(0.01, 0.01, 0.01);
+                liquidMesh.userData.isLiquid = true;
+                mainGlassGroup.add(liquidMesh);
+            }
+            
+            // 파티클 색상 업데이트
+            overflowParticles.material.color.setHex(liquidColorHex);
+            puddleMesh.material.color.setHex(liquidColorHex);
+        };
+
+        const createBackgroundGlasses = () => {
+            bgGlassesInfo = [];
+            for(let i=0; i<4; i++) {
+                const typeKeys = Object.keys(GLASS_TYPES);
+                const rType = typeKeys[Math.floor(Math.random() * typeKeys.length)];
+                const data = GLASS_TYPES[rType];
+                
+                // 임시로 뒷배경에 작은 실린더들 배치
+                const geo = new THREE.CylinderGeometry(data.radius*0.5, data.radius*0.4, data.height*0.8, 16);
+                const mat = new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent:true, opacity: 0.3, transmission: 0.8 });
+                const mesh = new THREE.Mesh(geo, mat);
+                
+                const x = -8 + (i * 5) + (Math.random()*2 - 1);
+                const z = -5 - Math.random() * 5;
+                mesh.position.set(x, data.height*0.4, z);
+                scene.add(mesh);
+
+                // 안에 든 액체 색
+                const rLiq = LIQUOR_BRANDS[rType][Math.floor(Math.random() * LIQUOR_BRANDS[rType].length)];
+                const liqGeo = new THREE.CylinderGeometry(data.radius*0.45, data.radius*0.35, data.height*0.5, 16);
+                const liqMat = new THREE.MeshBasicMaterial({ color: rLiq.colorHex, transparent: true, opacity: 0.5 });
+                const liqMesh = new THREE.Mesh(liqGeo, liqMat);
+                liqMesh.position.y = -data.height*0.15;
+                mesh.add(liqMesh);
+
+                bgGlassesInfo.push({
+                    mesh: mesh,
+                    text: OTHER_USERS_TEXTS[Math.floor(Math.random() * OTHER_USERS_TEXTS.length)],
+                    floatTime: Math.random() * Math.PI * 2, // offset
+                    worldPos: new THREE.Vector3(x, data.height, z)
+                });
+            }
+        };
+
+        const onWindowResize = () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        };
+
+        // 넘침 효과 로직 (파티클 & 웅덩이)
+        let isOverflowingState = false;
+        
+        const updateOverflowLogic = (time) => {
+            if (!isOverflowingState) {
+                overflowParticles.material.opacity = 0;
+                // 웅덩이 서서히 줄어듦
+                if(puddleMesh.scale.x > 0) {
+                    puddleMesh.scale.x -= 0.02;
+                    puddleMesh.scale.z -= 0.02;
+                    puddleMesh.material.opacity -= 0.01;
+                }
+                return;
+            }
+
+            // 분수 파티클 갱신
+            overflowParticles.material.opacity = 1;
+            const positions = overflowParticles.geometry.attributes.position.array;
+            const vels = overflowParticles.geometry.userData.velocities;
+            const topY = currentGlassData.type === 'sphere' ? 4 : currentGlassData.height + 0.5;
+
+            for(let i=0; i<positions.length/3; i++) {
+                // 아래로 떨어졌으면 위에서 다시 스폰
+                if(positions[i*3+1] < 0.1 || positions[i*3+1] === 0) {
+                    positions[i*3] = (Math.random() - 0.5) * currentGlassData.radius; // x
+                    positions[i*3+1] = topY; // y (잔 꼭대기)
+                    positions[i*3+2] = (Math.random() - 0.5) * currentGlassData.radius; // z
+                    
+                    vels[i].x = (Math.random() - 0.5) * 0.1;
+                    vels[i].y = Math.random() * 0.1 + 0.1; // 솟구치는 힘
+                    vels[i].z = (Math.random() - 0.5) * 0.1;
+                }
+
+                // 위치 업데이트 (중력 적용)
+                vels[i].y -= 0.01; // 중력
+                positions[i*3] += vels[i].x;
+                positions[i*3+1] += vels[i].y;
+                positions[i*3+2] += vels[i].z;
+            }
+            overflowParticles.geometry.attributes.position.needsUpdate = true;
+
+            // 웅덩이 커짐
+            puddleMesh.material.opacity = 0.5 + Math.sin(time * 5) * 0.2; // 깜빡임
+            if(puddleMesh.scale.x < 1) {
+                puddleMesh.scale.x += 0.01;
+                puddleMesh.scale.z += 0.01;
+            }
+        };
+
+        const animateLoop = (time) => {
+            if(!isAnimating) return;
+            requestAnimationFrame(animateLoop);
+            TWEEN.update(time);
+
+            const t = time * 0.001;
+            
+            // 웅덩이 및 파티클 업데이트
+            updateOverflowLogic(t);
+
+            // 잔 약간 떠다니는 효과 (숨쉬는 느낌)
+            if(!mainGlassGroup.userData.isDrinking) {
+                mainGlassGroup.position.y = Math.sin(t * 2) * 0.05;
+            }
+
+            renderer.render(scene, camera);
+        };
+
+
+        function App() {
+            const [myText, setMyText] = React.useState("");
+            const [drinksConsumed, setDrinksConsumed] = React.useState(0);
+            const [isDrinking, setIsDrinking] = React.useState(false);
+            
+            const [activeGlassId, setActiveGlassId] = React.useState('shot');
+            const [activeLiquor, setActiveLiquor] = React.useState(LIQUOR_BRANDS['shot'][0]);
+            
+            const [openModal, setOpenModal] = React.useState(null);
+            const [showToast, setShowToast] = React.useState("");
+            const [bgLabels, setBgLabels] = React.useState([]);
+
+            // Init Three.js on Mount
+            React.useEffect(() => {
+                initThreeJS();
+                
+                // 백그라운드 텍스트 2D 라벨 위치 동기화 루프
+                const labelLoop = setInterval(() => {
+                    if(!camera) return;
+                    const newLabels = bgGlassesInfo.map(bg => {
+                        // 3D 좌표를 2D 화면 좌표로 변환
+                        const vec = bg.worldPos.clone();
+                        // 둥둥 떠다니는 효과 추가
+                        vec.y += Math.sin(Date.now() * 0.002 + bg.floatTime) * 0.5;
+                        
+                        vec.project(camera);
+                        const x = (vec.x * .5 + .5) * window.innerWidth;
+                        const y = (vec.y * -.5 + .5) * window.innerHeight;
+                        return { text: bg.text, x, y, visible: vec.z < 1 };
+                    });
+                    setBgLabels(newLabels);
+                }, 50);
+
+                return () => {
+                    clearInterval(labelLoop);
+                    isAnimating = false;
+                    const container = document.getElementById('canvas-container');
+                    if(container) container.innerHTML = '';
+                };
+            }, []);
+
+            const activeGlass = GLASS_TYPES[activeGlassId];
+            const currentChars = myText.replace(/\s+/g, '').length;
+            const fillPercentage = (currentChars / activeGlass.capacity);
+            const isOverflowing = currentChars > activeGlass.capacity;
+
+            // 텍스트 길이에 따라 액체 높이 부드럽게 조절
+            React.useEffect(() => {
+                if(!liquidMesh) return;
+                
+                // Three.js 글로벌 상태로 넘침 전달
+                isOverflowingState = isOverflowing;
+
+                let targetScale = Math.min(fillPercentage, 1.05); // 최대 105% 까지만
+                targetScale = Math.max(targetScale, 0.01); // 최소값
+                
+                if (activeGlass.type === 'sphere') {
+                    // 와인잔은 구형이므로 scale을 전체적으로 키움
+                    new TWEEN.Tween(liquidMesh.scale)
+                        .to({ x: targetScale, y: targetScale, z: targetScale }, 300)
+                        .easing(TWEEN.Easing.Cubic.Out)
+                        .start();
+                } else {
+                    // 원통형은 y축(높이)만 키움 (geometry 중심점이 아래에 있음)
+                    new TWEEN.Tween(liquidMesh.scale)
+                        .to({ y: targetScale }, 300)
+                        .easing(TWEEN.Easing.Cubic.Out)
+                        .start();
+                }
+
+                // 액체 색상 변경
+                if(liquidMesh.material) {
+                    liquidMesh.material.color.setHex(activeLiquor.colorHex);
+                }
+
+            }, [currentChars, activeLiquor]);
+
+            const handleDrink = () => {
+                if (currentChars === 0 || isDrinking) return;
+                
+                setIsDrinking(true);
+                isOverflowingState = false; // 마실땐 넘침 효과 끔
+                mainGlassGroup.userData.isDrinking = true;
+
+                // 3D 마시기 애니메이션 (1인칭 카메라 쪽으로 이동하며 기울어짐)
+                const startPos = { x: mainGlassGroup.position.x, y: mainGlassGroup.position.y, z: mainGlassGroup.position.z, rotX: mainGlassGroup.rotation.x };
+                const targetPos = { x: 0, y: 5, z: 10, rotX: Math.PI / 4 }; // 카메라 앞으로 가져와서 기울임
+
+                new TWEEN.Tween(startPos)
+                    .to(targetPos, 800)
+                    .easing(TWEEN.Easing.Quadratic.In)
+                    .onUpdate(() => {
+                        mainGlassGroup.position.set(startPos.x, startPos.y, startPos.z);
+                        mainGlassGroup.rotation.x = startPos.rotX;
+                    })
+                    .onComplete(() => {
+                        // 꿀꺽 완료, 초기화
+                        setDrinksConsumed(prev => prev + 1);
+                        setMyText("");
+                        const msg = isOverflowing ? "넘치던 스트레스 완샷!" : "스트레스 한 잔, 비워냈습니다!";
+                        setShowToast(msg);
+                        setTimeout(() => setShowToast(""), 3000);
+                        
+                        // 다시 원위치로
+                        mainGlassGroup.position.set(0, 0, 2);
+                        mainGlassGroup.rotation.x = 0;
+                        if(activeGlass.type === 'sphere') liquidMesh.scale.set(0.01, 0.01, 0.01);
+                        else liquidMesh.scale.y = 0.01;
+                        
+                        mainGlassGroup.userData.isDrinking = false;
+                        setIsDrinking(false);
+                    })
+                    .start();
+            };
+
+            const changeGlass = (glassId) => {
+                if (drinksConsumed >= GLASS_TYPES[glassId].reqDrinks) {
+                    setActiveGlassId(glassId);
+                    const newLiquor = LIQUOR_BRANDS[glassId][0];
+                    setActiveLiquor(newLiquor);
+                    setMyText("");
+                    setOpenModal(null);
+                    
+                    // 3D 씬 재생성
+                    buildGlass(GLASS_TYPES[glassId], newLiquor.colorHex);
+                } else {
+                    setShowToast(`마신 횟수 ${GLASS_TYPES[glassId].reqDrinks}회가 필요합니다!`);
+                    setTimeout(() => setShowToast(""), 3000);
+                }
+            };
+
+            const changeLiquor = (liquor) => {
+                setActiveLiquor(liquor);
+                setOpenModal(null);
+                if(liquidMesh) liquidMesh.material.color.setHex(liquor.colorHex);
+            };
+
+            return (
+                <div id="ui-layer" className="font-sans flex flex-col">
+                    
+                    {/* Header Info */}
+                    <div className="absolute top-4 left-4 z-40 bg-black/50 p-3 rounded-xl backdrop-blur-md border border-white/10 shadow-lg interactive-ui">
+                        <h1 className="text-xl font-bold text-amber-500 mb-1 flex items-center">
+                            <i className="fas fa-beer text-amber-400 mr-2"></i>iwantdrink 3D
+                        </h1>
+                        <div className="text-xs text-gray-300 flex items-center gap-2">
+                            <span>마신 횟수: <strong className="text-white text-base">{drinksConsumed}</strong>잔</span>
+                        </div>
+                    </div>
+
+                    {/* Toast */}
+                    {showToast && (
+                        <div className="absolute top-20 left-1/2 transform -translate-x-1/2 z-50 bg-white/10 backdrop-blur-lg border border-white/20 text-white px-6 py-2 rounded-full shadow-2xl font-handwriting text-2xl tracking-wider modal-enter">
+                            {showToast}
+                        </div>
+                    )}
+
+                    {/* 부유하는 백그라운드 텍스트 */}
+                    {!isDrinking && bgLabels.map((lbl, idx) => (
+                        <div key={idx} 
+                             className="floating-text-label font-handwriting text-2xl"
+                             style={{ 
+                                 left: `${lbl.x}px`, 
+                                 top: `${lbl.y}px`,
+                                 opacity: lbl.visible ? 0.6 : 0
+                             }}>
+                            "{lbl.text}"
+                        </div>
+                    ))}
+
+                    {/* 좌측 사이드바 (잔/술 변경 메뉴) */}
+                    <div className={`absolute left-4 top-1/2 transform -translate-y-1/2 flex flex-col gap-4 z-30 transition-opacity duration-300 interactive-ui ${isDrinking ? 'opacity-0' : 'opacity-100'}`}>
+                        <button 
+                            onClick={() => setOpenModal('glass')}
+                            className="w-14 h-14 bg-slate-800/80 border border-slate-600 rounded-2xl flex flex-col items-center justify-center text-white hover:bg-slate-700 hover:border-amber-500 transition-all shadow-lg group"
+                        >
+                            <i className="fas fa-glass-whiskey text-xl text-gray-400 group-hover:text-amber-400 mb-1"></i>
+                            <span className="text-[10px] font-bold">잔 변경</span>
+                        </button>
+                        
+                        <button 
+                            onClick={() => setOpenModal('liquor')}
+                            className="w-14 h-14 bg-slate-800/80 border border-slate-600 rounded-2xl flex flex-col items-center justify-center text-white hover:bg-slate-700 hover:border-amber-500 transition-all shadow-lg group"
+                        >
+                            <i className="fas fa-wine-bottle text-xl text-gray-400 group-hover:text-amber-400 mb-1"></i>
+                            <span className="text-[10px] font-bold">술 선택</span>
+                        </button>
+                    </div>
+
+                    {/* 중앙 하단 텍스트 (술 이름) */}
+                    <div className="flex-1 flex items-center justify-center pointer-events-none">
+                        <div className={`mt-32 transition-opacity duration-300 ${isDrinking ? 'opacity-0' : 'opacity-100'}`}>
+                            {isOverflowing ? (
+                                <div className="text-red-400 text-lg font-bold animate-pulse bg-black/60 px-6 py-2 rounded-full border border-red-500/50 backdrop-blur-sm">
+                                    잔이 넘치고 있습니다! 어서 마셔버리세요!
+                                </div>
+                            ) : (
+                                currentChars > 0 && (
+                                    <div className="text-gray-300 text-2xl font-handwriting bg-black/40 px-6 py-2 rounded-full backdrop-blur-sm">
+                                        {activeLiquor.text}...
+                                    </div>
+                                )
+                            )}
+                        </div>
+                    </div>
+
+                    {/* 채팅형 텍스트 입력창 (하단 고정) */}
+                    <div className={`interactive-ui absolute bottom-0 left-0 w-full bg-black/60 backdrop-blur-md border-t border-white/10 p-4 z-40 flex flex-col gap-2 shadow-[0_-10px_30px_rgba(0,0,0,0.5)] transition-transform duration-500 ${isDrinking ? 'translate-y-full' : 'translate-y-0'}`}>
+                        <div className="flex justify-between items-center px-1 max-w-4xl mx-auto w-full">
+                            <span className="text-xs text-gray-400">
+                                현재 <strong className={activeLiquor.tailwind.replace('bg-', 'text-')}>{activeLiquor.name}</strong>을(를) <strong className="text-amber-400">{activeGlass.name}</strong>에 따르고 있습니다.
+                            </span>
+                            <span className={`text-xs font-bold px-2 py-1 rounded-md ${isOverflowing ? 'bg-red-500/20 text-red-400' : 'bg-white/10 text-gray-300'}`}>
+                                {currentChars} / {activeGlass.capacity}자
+                            </span>
+                        </div>
+                        <div className="flex gap-3 items-end max-w-4xl mx-auto w-full">
+                            <textarea
+                                value={myText}
+                                onChange={(e) => setMyText(e.target.value)}
+                                placeholder="오늘 있었던 힘든 일, 짜증나는 일을 여기에 쏟아내세요..."
+                                className={`flex-1 bg-white/5 border rounded-2xl p-4 text-white placeholder-gray-500 focus:outline-none transition-colors resize-none font-medium leading-relaxed backdrop-blur-sm ${isOverflowing ? 'border-red-500 textarea-overflow' : 'border-white/20 focus:border-white/50'}`}
+                                rows={myText.length > 50 ? 2 : 1}
+                                disabled={isDrinking}
+                            ></textarea>
+                            <button 
+                                onClick={handleDrink}
+                                disabled={currentChars === 0 || isDrinking}
+                                className={`h-[56px] px-6 rounded-2xl font-bold transition-all whitespace-nowrap flex items-center justify-center ${
+                                    currentChars > 0 
+                                    ? (isOverflowing ? 'bg-red-600 hover:bg-red-500 text-white shadow-[0_0_15px_rgba(220,38,38,0.6)] hover:scale-105' : 'bg-amber-600 hover:bg-amber-500 text-white shadow-[0_0_15px_rgba(217,119,6,0.4)] hover:scale-105')
+                                    : 'bg-white/10 text-gray-500 cursor-not-allowed border border-white/5'
+                                }`}
+                            >
+                                <i className={`fas ${isDrinking ? 'fa-spinner fa-spin' : 'fa-glass-cheers'} mr-2 text-lg`}></i>
+                                {isDrinking ? '마시는 중...' : '마시기'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* 모달 공통 레이아웃 */}
+                    {openModal && (
+                        <div className="interactive-ui fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setOpenModal(null)}>
+                            <div className="bg-zinc-900 border border-white/10 rounded-3xl w-full max-w-sm p-6 shadow-2xl modal-enter relative" onClick={e => e.stopPropagation()}>
+                                
+                                <button onClick={() => setOpenModal(null)} className="absolute top-4 right-5 text-gray-400 hover:text-white">
+                                    <i className="fas fa-times text-xl"></i>
+                                </button>
+
+                                {/* 1. 잔 변경 모달 */}
+                                {openModal === 'glass' && (
+                                    <>
+                                        <h2 className="text-xl font-bold text-white mb-6 text-center">어떤 잔에 따를까요?</h2>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            {Object.values(GLASS_TYPES).map(glass => {
+                                                const isUnlocked = drinksConsumed >= glass.reqDrinks;
+                                                const isActive = activeGlassId === glass.id;
+                                                
+                                                return (
+                                                    <button 
+                                                        key={glass.id}
+                                                        onClick={() => changeGlass(glass.id)}
+                                                        className={`flex flex-col items-center p-4 rounded-2xl transition-all relative ${
+                                                            isActive ? 'bg-amber-500/20 border-2 border-amber-500' : 
+                                                            isUnlocked ? 'bg-white/5 hover:bg-white/10 border-2 border-transparent' : 'opacity-50 bg-black/50 border-2 border-white/5 cursor-not-allowed'
+                                                        }`}
+                                                    >
+                                                        {!isUnlocked && (
+                                                            <div className="absolute -top-3 right-2 bg-red-600 text-xs px-2 py-1 rounded-full z-10 font-bold shadow-lg">
+                                                                <i className="fas fa-lock mr-1"></i>{glass.reqDrinks}잔
+                                                            </div>
+                                                        )}
+                                                        <i className={`fas ${glass.icon} text-3xl mb-3 ${isActive ? 'text-amber-400' : 'text-gray-400'}`}></i>
+                                                        <span className="text-sm font-bold text-white">{glass.name}</span>
+                                                        <span className="text-xs text-gray-400 mt-1">{glass.capacity}자</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </>
+                                )}
+
+                                {/* 2. 술 선택 모달 */}
+                                {openModal === 'liquor' && (
+                                    <>
+                                        <h2 className="text-xl font-bold text-white mb-2 text-center">오늘의 술</h2>
+                                        <p className="text-xs text-gray-400 text-center mb-6">현재 선택된 <span className="text-amber-400">{activeGlass.name}</span>에 어울리는 메뉴입니다.</p>
+                                        
+                                        <div className="flex flex-col gap-3">
+                                            {LIQUOR_BRANDS[activeGlassId].map(liquor => {
+                                                const isSelected = activeLiquor.id === liquor.id;
+                                                return (
+                                                    <button 
+                                                        key={liquor.id}
+                                                        onClick={() => changeLiquor(liquor)}
+                                                        className={`flex items-center justify-between p-4 rounded-2xl transition-all ${
+                                                            isSelected ? 'bg-white/10 border border-white/30' : 'bg-white/5 hover:bg-white/10 border border-transparent'
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-center gap-3">
+                                                            {/* 술 색상 미리보기 (Tailwind 클래스 활용) */}
+                                                            <div className={`w-8 h-8 rounded-full border border-white/30 ${liquor.tailwind}`}></div>
+                                                            <span className="font-bold text-white">{liquor.name}</span>
+                                                        </div>
+                                                        {isSelected && <i className="fas fa-check text-amber-500"></i>}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
